@@ -2,39 +2,43 @@ const ical = require("ical.js");
 const axios = require("axios").default;
 const transducers = require("transducers.js");
 
+const helpers = require("./helpers");
+
+const allowedModes = ["all", "overview", "sum", "json"];
+
 async function main() {
-	const employeeNames = process.argv.slice(2);
+	const mode = process.argv[2];
+	const employeeNames = process.argv.slice(3);
 	const feedUrl = process.env.FEED_URL;
+
+	let hasInputError = false;
+
+	if (!feedUrl) {
+		console.error("Missing envvar FEED_URL");
+		hasInputError = true;
+	}
+
+	if (!mode || !allowedModes.includes(mode)) {
+		console.error(`Missing mode. Allowed modes are: ${allowedModes.join(", ")}`);
+		hasInputError = true;
+	}
+
+	if (hasInputError) {
+		console.error("\nUsage: node src/index.js <mode:all|overview|sum> [employees]\n");
+		return 2;
+	}
 
 	const transforms = [];
 
 	if (employeeNames.length) {
 		transforms.push(
-			transducers.filter(event => {
-				const fields = event[1];
-
-				const summary = fields.find(field => {
-					return field[0] == "summary";
-				});
-
-				return employeeNames.some(employee =>
-					summary[3].includes(employee)
-				);
-			})
+			transducers.filter(helpers.filterForEmployeesFactory(employeeNames))
 		);
 	}
 
 	transforms.push(
-		transducers.map(event => {
-			const [type, fields] = event;
-
-			return {
-				description: fields.find(field => field[0] == "description")[3],
-				summary: fields.find(field => field[0] == "summary")[3],
-				start: fields.find(field => field[0] == "dtstart")[3],
-				end: fields.find(field => field[0] == "dtend")[3],
-			};
-		})
+		transducers.map(helpers.createDownTime),
+		transducers.map(helpers.parseSummary),
 	);
 
 	const transform = transducers.compose(...transforms);
@@ -53,20 +57,25 @@ async function main() {
 
 	const employeeEvents = transducers
 		.into([], transform, events)
-		.sort((a, b) => {
-			if (a.summary > b.summary) {
-				return 1;
-			} else if (b.summary > a.summary) {
-				return -1;
-			} else {
-				return 0;
-			}
-		});
+		.sort(helpers.sortByFactory("name"));
 
-	console.table(employeeEvents);
+	if (["overview", "all"].includes(mode)) {
+		console.log("Overview:");
+		console.table(employeeEvents);
+	}
+
+	if (["sum", "all"].includes(mode)) {
+		const sumsByEmployee = employeeEvents
+			.reduce(helpers.groupByEmployeeAndType, {});
+
+		console.log("\nSumByEmployee:");
+		helpers.prettyPrintGroupedResults(sumsByEmployee);
+	}
 }
 
-main().catch(err => {
+main().then(exitCode => {
+	process.exit(exitCode || 0);
+}).catch(err => {
 	console.error("Uncatched error in main!");
 	console.error(err);
 	process.exit(1);
